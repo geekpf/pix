@@ -1,25 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import QRCode from 'react-qr-code';
-import { Settings, Copy, CheckCircle, RefreshCw, Loader2, ShieldCheck, Wallet, ArrowRight } from 'lucide-react';
+import { Copy, CheckCircle, RefreshCw, Loader2, ShieldCheck, Wallet, ArrowRight, DollarSign } from 'lucide-react';
 import { createBilling, checkBillingStatus } from './services/abacateService';
-import { initSupabase, saveTransaction, updateTransactionStatus, getAbacateApiKey, saveAbacateApiKeyToDB } from './services/supabaseService';
+import { saveTransaction, updateTransactionStatus, getAbacateApiKey } from './services/supabaseService';
 import { formatCPF, formatPhone, cleanString } from './utils/formatters';
-import { CustomerData, AppConfig, AbacateBillingResponse } from './types';
-import { SettingsModal } from './components/SettingsModal';
-import { SUPABASE_URL, SUPABASE_KEY } from './config';
-
-const DEFAULT_AMOUNT_CENTS = 100; // R$ 1,00
+import { CustomerData, AbacateBillingResponse } from './types';
 
 const App: React.FC = () => {
-  // Config State
-  const [config, setConfig] = useState<AppConfig>({
-    abacateApiKey: '', 
-    supabaseUrl: SUPABASE_URL,
-    supabaseKey: SUPABASE_KEY
-  });
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isSupabaseConfigured, setIsSupabaseConfigured] = useState(true); // Default to true as we have hardcoded config
-
   // Form State
   const [formData, setFormData] = useState<CustomerData>({
     name: '',
@@ -27,6 +14,7 @@ const App: React.FC = () => {
     phone: '',
     cpf: ''
   });
+  const [amount, setAmount] = useState(''); // Stores formatted string like "R$ 10,00"
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,65 +25,12 @@ const App: React.FC = () => {
   
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    // We check local storage to see if user *overrode* the defaults, otherwise we stick to defaults
-    const savedConfig = localStorage.getItem('app_config');
-    
-    if (savedConfig) {
-      try {
-        const parsed = JSON.parse(savedConfig);
-        const newUrl = parsed.supabaseUrl || SUPABASE_URL;
-        const newKey = parsed.supabaseKey || SUPABASE_KEY;
-        
-        setConfig(prev => ({ 
-          ...prev, 
-          supabaseUrl: newUrl, 
-          supabaseKey: newKey 
-        }));
-
-        // If saved config differs from default, re-init
-        if (newUrl !== SUPABASE_URL || newKey !== SUPABASE_KEY) {
-          initSupabase(newUrl, newKey);
-        }
-      } catch (e) {
-        console.error("Error parsing saved config", e);
-      }
-    }
-  }, []);
-
   // Cleanup polling on unmount
   useEffect(() => {
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, []);
-
-  const handleSaveConfig = async (newConfig: AppConfig) => {
-    try {
-      // 1. Init Supabase with new creds
-      initSupabase(newConfig.supabaseUrl, newConfig.supabaseKey);
-      
-      // 2. If user provided an Abacate Key, save it to the DB
-      if (newConfig.abacateApiKey) {
-        await saveAbacateApiKeyToDB(newConfig.abacateApiKey);
-      }
-
-      // 3. Save only Supabase creds to local storage
-      const storageConfig = {
-        supabaseUrl: newConfig.supabaseUrl,
-        supabaseKey: newConfig.supabaseKey
-      };
-      localStorage.setItem('app_config', JSON.stringify(storageConfig));
-      
-      setConfig({ ...newConfig, abacateApiKey: '' }); // Clear sensitive key from memory/UI
-      setIsSupabaseConfigured(!!newConfig.supabaseUrl);
-      setIsSettingsOpen(false);
-      setError(null);
-    } catch (err) {
-      console.error(err);
-      setError("Erro ao salvar configurações no Supabase. Verifique a URL e a Key.");
-    }
-  };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -105,6 +40,20 @@ const App: React.FC = () => {
     if (name === 'phone') formattedValue = formatPhone(value);
 
     setFormData(prev => ({ ...prev, [name]: formattedValue }));
+  };
+
+  const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let value = e.target.value.replace(/\D/g, '');
+    
+    if (!value) {
+      setAmount('');
+      return;
+    }
+    
+    // Convert to number (cents) then to currency string
+    const numberValue = parseInt(value) / 100;
+    const formatted = numberValue.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    setAmount(formatted);
   };
 
   const startPolling = (billingId: string, apiKey: string) => {
@@ -141,25 +90,27 @@ const App: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setIsLoading(true);
 
-    if (!isSupabaseConfigured) {
-      setError("Conecte-se ao Supabase nas configurações primeiro.");
-      setIsSettingsOpen(true);
-      setIsLoading(false);
+    // Calculate cents from formatted string
+    const amountCents = parseInt(amount.replace(/\D/g, '')) || 0;
+
+    if (amountCents < 100) {
+      setError("O valor mínimo é de R$ 1,00");
       return;
     }
+
+    setIsLoading(true);
 
     try {
       // 1. Fetch Abacate Key from DB
       const abacateKey = await getAbacateApiKey();
       
       if (!abacateKey) {
-        throw new Error("API Key do Abacate Pay não encontrada no Banco de Dados. Configure-a no menu.");
+        throw new Error("API Key do Abacate Pay não encontrada no Banco de Dados. Insira a chave na tabela 'app_config' via SQL.");
       }
 
       // 2. Create Billing
-      const billing = await createBilling(abacateKey, formData, DEFAULT_AMOUNT_CENTS);
+      const billing = await createBilling(abacateKey, formData, amountCents);
       setTransaction(billing);
       setPaymentStatus('PENDING');
 
@@ -184,10 +135,6 @@ const App: React.FC = () => {
       if (msg === 'Failed to fetch') msg = "Erro de conexão. Verifique se o Supabase está acessível.";
       if (msg.includes("Supabase not initialized")) msg = "Conecte ao Supabase primeiro.";
       setError(msg);
-      
-      if (err.message.includes("API Key")) {
-        setIsSettingsOpen(true);
-      }
     } finally {
       setIsLoading(false);
     }
@@ -205,18 +152,12 @@ const App: React.FC = () => {
     setTransaction(null);
     setPaymentStatus('PENDING');
     setFormData({ name: '', email: '', phone: '', cpf: '' });
+    setAmount('');
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
   };
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 md:p-6 font-sans">
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)} 
-        onSave={handleSaveConfig} 
-        initialConfig={config} 
-      />
-
       <div className="w-full max-w-4xl grid md:grid-cols-2 gap-8 items-start">
         
         {/* Left Side: Branding / Intro */}
@@ -249,14 +190,6 @@ const App: React.FC = () => {
         {/* Right Side: The Card */}
         <div className="w-full bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden relative">
           
-          <button 
-            onClick={() => setIsSettingsOpen(true)}
-            className={`absolute top-4 right-4 p-2 rounded-full transition-colors ${!isSupabaseConfigured ? 'bg-red-100 text-red-500 animate-pulse' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50'}`}
-            title="Configurações do Banco"
-          >
-            <Settings size={20} />
-          </button>
-
           {!transaction ? (
             <div className="p-8">
               <div className="mb-8">
@@ -271,6 +204,26 @@ const App: React.FC = () => {
               )}
 
               <form onSubmit={handleSubmit} className="space-y-5">
+                
+                {/* Amount Input */}
+                <div className="relative">
+                  <label className="block text-xs font-semibold uppercase text-slate-500 mb-1.5 ml-1">Valor do Pagamento</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      name="amount"
+                      required
+                      value={amount}
+                      onChange={handleAmountChange}
+                      placeholder="R$ 0,00"
+                      className="w-full pl-12 pr-4 py-4 bg-emerald-50 border border-emerald-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xl font-bold text-emerald-900 placeholder-emerald-300 transition-all"
+                    />
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-emerald-600">
+                      <DollarSign size={24} />
+                    </div>
+                  </div>
+                </div>
+
                 <div>
                   <label className="block text-xs font-semibold uppercase text-slate-500 mb-1.5 ml-1">Nome Completo</label>
                   <input
