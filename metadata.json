@@ -1,0 +1,5 @@
+{
+  "name": "Abacate Pix Generator",
+  "description": "A streamlined payment interface to generate Pix QR Codes using Abacate Pay and track transactions via Supabase.",
+  "requestFramePermissions": []
+}
